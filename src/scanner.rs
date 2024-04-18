@@ -1,5 +1,9 @@
 extern crate rusty_leveldb;
-use bitcoin::{blockdata::block::Header, consensus::Decodable, hashes::Hash};
+use bitcoin::{
+    blockdata::block::Header,
+    consensus::{serialize, Decodable, Encodable},
+    hashes::Hash,
+};
 use rusty_leveldb::{LdbIterator, Options, DB};
 
 use std::{
@@ -78,6 +82,7 @@ bitflags::bitflags! {
         const BLOCK_FAILED_MASK        = Self::BLOCK_FAILED_VALID.bits() | Self::BLOCK_FAILED_CHILD.bits();
     }
 }
+const IS_COINBASE_MASK: u32 = 1;
 
 impl Scanner {
     pub fn new(datadir: PathBuf) -> Self {
@@ -178,10 +183,11 @@ impl Scanner {
         }
     }
 
-    #[allow(dead_code)]
-    fn chain_get(&mut self, key: &[u8]) -> Vec<u8> {
-        let value = self.chain_state.get(key).unwrap();
-        Self::obfs(&self.chain_obfs, &value)
+    pub fn chain_get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        match self.chain_state.get(key) {
+            Some(value) => Some(Self::obfs(&self.chain_obfs, &value)),
+            None => None,
+        }
     }
 
     fn obfs(obfs: &Option<Vec<u8>>, value: &[u8]) -> Vec<u8> {
@@ -192,6 +198,24 @@ impl Scanner {
                 .map(|(i, &byte)| byte ^ obfs[i % obfs.len()])
                 .collect(),
             None => value.to_owned(),
+        }
+    }
+
+    pub fn chain_state_record(&mut self, txid: &bitcoin::Txid, vout: u64) -> Option<(u32, u32)> {
+        let key1 = b"C";
+        let key2 = txid.to_byte_array();
+        let key3 = serialize(&bitcoin::VarInt(vout));
+        let key = [key1, &key2[..], &key3[..]].concat();
+
+        match self.chain_get(&key[..]) {
+            Some(value) => {
+                let mut r = Cursor::new(value);
+                let height_and_is_coinbase = read_varint_core(&mut r).unwrap() as u32;
+                let height = height_and_is_coinbase >> 1;
+                let is_coinbase = height_and_is_coinbase & IS_COINBASE_MASK;
+                Some((height, is_coinbase))
+            }
+            None => None,
         }
     }
 
